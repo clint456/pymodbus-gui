@@ -35,32 +35,40 @@ class DeviceListWidget(QWidget):
     def init_ui(self):
         """初始化界面"""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)  # 减小边距
+        layout.setSpacing(8)  # 设置间距
         
         # 工具栏
         toolbar_layout = QHBoxLayout()
+        toolbar_layout.setSpacing(5)  # 按钮之间的间距
         
         # 添加设备按钮
-        self.add_btn = QPushButton("添加设备")
+        self.add_btn = QPushButton("添加")
+        self.add_btn.setToolTip("添加新的 Poll 客户端设备")
         self.add_btn.clicked.connect(self.add_device)
         toolbar_layout.addWidget(self.add_btn)
         
         # 连接按钮
         self.connect_btn = QPushButton("连接")
+        self.connect_btn.setToolTip("连接选中的设备")
         self.connect_btn.clicked.connect(self.connect_device)
         toolbar_layout.addWidget(self.connect_btn)
         
         # 断开按钮
         self.disconnect_btn = QPushButton("断开")
+        self.disconnect_btn.setToolTip("断开选中设备的连接")
         self.disconnect_btn.clicked.connect(self.disconnect_device)
         toolbar_layout.addWidget(self.disconnect_btn)
         
         # 删除按钮
         self.delete_btn = QPushButton("删除")
+        self.delete_btn.setToolTip("删除选中的设备")
         self.delete_btn.clicked.connect(self.delete_device)
         toolbar_layout.addWidget(self.delete_btn)
         
         # 刷新按钮
         self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.setToolTip("刷新设备列表")
         self.refresh_btn.clicked.connect(self.refresh_device_list)
         toolbar_layout.addWidget(self.refresh_btn)
         
@@ -69,10 +77,10 @@ class DeviceListWidget(QWidget):
         
         # 设备列表表格
         self.device_table = QTableWidget()
-        self.device_table.setColumnCount(8)
+        self.device_table.setColumnCount(6)  # 减少列数
         self.device_table.setHorizontalHeaderLabels([
-            "状态", "设备ID", "设备名称", "类型", 
-            "连接信息", "从站地址", "超时(秒)", "错误信息"
+            "状态", "设备名称", "类型", 
+            "连接信息", "从站", "超时"
         ])
         
         # 设置表格属性
@@ -80,17 +88,16 @@ class DeviceListWidget(QWidget):
         self.device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.device_table.setAlternatingRowColors(True)
+        self.device_table.verticalHeader().setDefaultSectionSize(32)  # 设置行高
         
         # 设置列宽
         header = self.device_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         
         # 双击事件
         self.device_table.doubleClicked.connect(self.edit_device)
@@ -120,35 +127,36 @@ class DeviceListWidget(QWidget):
                 status_item.setToolTip("已连接")
             else:
                 status_item.setForeground(QBrush(QColor(213, 55, 52)))  # 红色
-                status_item.setToolTip("未连接")
+                status_item.setToolTip("未连接" + (f"\n{device.error_message}" if device.error_message else ""))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.device_table.setItem(row, 0, status_item)
             
-            # 设备ID
-            self.device_table.setItem(row, 1, QTableWidgetItem(device.config.device_id))
-            
             # 设备名称
-            self.device_table.setItem(row, 2, QTableWidgetItem(device.config.name))
+            name_item = QTableWidgetItem(device.config.name)
+            name_item.setToolTip(f"设备ID: {device.config.device_id}")
+            self.device_table.setItem(row, 1, name_item)
             
             # 类型
-            self.device_table.setItem(row, 3, QTableWidgetItem(device.config.connection_type.value))
+            type_item = QTableWidgetItem(device.config.connection_type.value)
+            self.device_table.setItem(row, 2, type_item)
             
             # 连接信息
             if device.config.connection_type == ConnectionType.RTU:
-                conn_info = f"{device.config.port} ({device.config.baudrate})"
+                conn_info = f"{device.config.port}\n{device.config.baudrate}bps"
             else:
-                conn_info = f"{device.config.host}:{device.config.tcp_port}"
-            self.device_table.setItem(row, 4, QTableWidgetItem(conn_info))
+                conn_info = f"{device.config.host}\n:{device.config.tcp_port}"
+            conn_item = QTableWidgetItem(conn_info)
+            self.device_table.setItem(row, 3, conn_item)
             
             # 从站地址
-            self.device_table.setItem(row, 5, QTableWidgetItem(str(device.config.slave_id)))
+            slave_item = QTableWidgetItem(str(device.config.slave_id))
+            slave_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.device_table.setItem(row, 4, slave_item)
             
             # 超时
-            self.device_table.setItem(row, 6, QTableWidgetItem(str(device.config.timeout)))
-            
-            # 错误信息
-            error_msg = device.error_message or ""
-            self.device_table.setItem(row, 7, QTableWidgetItem(error_msg))
+            timeout_item = QTableWidgetItem(f"{device.config.timeout}s")
+            timeout_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.device_table.setItem(row, 5, timeout_item)
     
     def get_selected_device_id(self) -> str:
         """
@@ -159,7 +167,11 @@ class DeviceListWidget(QWidget):
         """
         current_row = self.device_table.currentRow()
         if current_row >= 0:
-            return self.device_table.item(current_row, 1).text()
+            # 从 tooltip 中获取设备ID
+            name_item = self.device_table.item(current_row, 1)
+            tooltip = name_item.toolTip()
+            if tooltip.startswith("设备ID: "):
+                return tooltip.replace("设备ID: ", "")
         return ""
     
     def add_device(self):
