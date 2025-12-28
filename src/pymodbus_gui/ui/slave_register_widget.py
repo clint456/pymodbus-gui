@@ -175,8 +175,10 @@ class SlaveRegisterWidget(QWidget):
         return table
     
     def get_points_by_type(self, register_type: str) -> list[RegisterPoint]:
-        """获取指定类型的点位列表"""
-        return [p for p in self.slave.config.register_points if p.register_type == register_type]
+        """获取指定类型的点位列表（按地址排序）"""
+        points = [p for p in self.slave.config.register_points if p.register_type == register_type]
+        # 按地址排序，确保显示顺序与地址顺序一致
+        return sorted(points, key=lambda p: p.address)
     
     def refresh_values(self):
         """刷新所有寄存器值"""

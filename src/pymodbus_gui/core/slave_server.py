@@ -112,6 +112,7 @@ class ModbusSlave:
         
         # 回调函数
         self.on_value_change: Optional[Callable] = None
+        self.on_log: Optional[Callable[[str, str], None]] = None  # 日志回调 (message, level)
         
         # 初始化数据存储
         self._init_datastore()
@@ -119,29 +120,12 @@ class ModbusSlave:
     def _init_datastore(self):
         """初始化数据存储"""
         # 创建数据块
-        # pymodbus 的 ModbusSequentialDataBlock(address, values)
-        # address 是起始地址，values 是值列表
-        # 创建从地址0开始的数据块
         coils = ModbusSequentialDataBlock(0, [0] * self.config.coil_count)
         discrete_inputs = ModbusSequentialDataBlock(0, [0] * self.config.discrete_input_count)
         holding_registers = ModbusSequentialDataBlock(0, [0] * self.config.holding_register_count)
         input_registers = ModbusSequentialDataBlock(0, [0] * self.config.input_register_count)
         
-        # 根据点位配置初始化值
-        for point in self.config.register_points:
-            try:
-                value = int(point.value)
-                if point.register_type == 'coil':
-                    coils.setValues(point.address, [value])
-                elif point.register_type == 'discrete_input':
-                    discrete_inputs.setValues(point.address, [value])
-                elif point.register_type == 'holding_register':
-                    holding_registers.setValues(point.address, [value])
-                elif point.register_type == 'input_register':
-                    input_registers.setValues(point.address, [value])
-                logging.info(f"初始化点位 {point.name} (地址{point.address}) = {value}")
-            except Exception as e:
-                logging.warning(f"初始化点位 {point.name} 失败: {e}")
+        self._log(f"初始化数据存储 - Coils:{self.config.coil_count}, DI:{self.config.discrete_input_count}, HR:{self.config.holding_register_count}, IR:{self.config.input_register_count}", "INFO")
         
         # 创建从站上下文
         self.slave_context = ModbusSlaveContext(
@@ -150,6 +134,31 @@ class ModbusSlave:
             hr=holding_registers,  # 保持寄存器
             ir=input_registers  # 输入寄存器
         )
+        
+        # 根据点位配置初始化值
+        # 注意：SlaveContext的getValues/setValues使用Modbus协议地址，
+        # 但内部会+1转换为DataBlock索引
+        initialized_count = 0
+        for point in self.config.register_points:
+            try:
+                value = int(point.value)
+                # 通过SlaveContext设置值，直接使用Modbus协议地址
+                if point.register_type == 'coil':
+                    self.slave_context.setValues(1, point.address, [value])
+                elif point.register_type == 'discrete_input':
+                    self.slave_context.setValues(2, point.address, [value])
+                elif point.register_type == 'holding_register':
+                    self.slave_context.setValues(3, point.address, [value])
+                elif point.register_type == 'input_register':
+                    self.slave_context.setValues(4, point.address, [value])
+                logging.info(f"初始化点位 {point.name} (地址{point.address}) = {value}")
+                initialized_count += 1
+            except Exception as e:
+                logging.warning(f"初始化点位 {point.name} 失败: {e}")
+                self._log(f"初始化点位 {point.name} 失败: {e}", "WARNING")
+        
+        if initialized_count > 0:
+            self._log(f"成功初始化 {initialized_count} 个寄存器点位", "SUCCESS")
         
         # 创建服务器上下文（支持单个从站地址）
         self.datastore_context = ModbusServerContext(
@@ -202,12 +211,16 @@ class ModbusSlave:
                 
                 self.running = True
                 self.error_message = None
-                return OperationResult(True, data=f"Slave {self.config.name} 启动成功")
+                success_msg = f"Slave {self.config.name} 启动成功"
+                self._log(success_msg, "SUCCESS")
+                return OperationResult(True, data=success_msg)
                 
             except Exception as e:
                 self.error_message = str(e)
                 self.running = False
-                return OperationResult(False, error=f"启动失败: {str(e)}")
+                error_msg = f"启动失败: {str(e)}"
+                self._log(error_msg, "ERROR")
+                return OperationResult(False, error=error_msg)
     
     def _run_rtu_server(self, identity):
         """在线程中运行 RTU 服务器"""
@@ -255,14 +268,19 @@ class ModbusSlave:
                 parity=self.config.parity,
                 stopbits=self.config.stopbits
             )
-            logging.info(f"RTU 服务器已启动: {self.config.port}")
+            info_msg = f"RTU 服务器已启动: {self.config.port} (波特率:{self.config.baudrate}, 从站地址:{self.config.device_address})"
+            logging.info(info_msg)
+            self._log(info_msg, "INFO")
             # 服务器运行直到被关闭
             await self.server.serve_forever()
         except asyncio.CancelledError:
             logging.info("RTU 服务器正常停止")
+            self._log("RTU 服务器正常停止", "INFO")
             # 不重新抛出，让线程正常退出
         except Exception as e:
-            logging.error(f"RTU 服务器错误: {e}")
+            error_msg = f"RTU 服务器错误: {e}"
+            logging.error(error_msg)
+            self._log(error_msg, "ERROR")
             raise
     
     def _run_tcp_server(self, identity):
@@ -307,14 +325,19 @@ class ModbusSlave:
                 identity=identity,
                 address=(self.config.host, self.config.tcp_port)
             )
-            logging.info(f"TCP 服务器已启动: {self.config.host}:{self.config.tcp_port}")
+            info_msg = f"TCP 服务器已启动: {self.config.host}:{self.config.tcp_port} (从站地址:{self.config.device_address})"
+            logging.info(info_msg)
+            self._log(info_msg, "INFO")
             # 服务器运行直到被关闭
             await self.server.serve_forever()
         except asyncio.CancelledError:
             logging.info("TCP 服务器正常停止")
+            self._log("TCP 服务器正常停止", "INFO")
             # 不重新抛出，让线程正常退出
         except Exception as e:
-            logging.error(f"TCP 服务器错误: {e}")
+            error_msg = f"TCP 服务器错误: {e}"
+            logging.error(error_msg)
+            self._log(error_msg, "ERROR")
             raise
     
     def stop(self) -> OperationResult:
@@ -359,10 +382,14 @@ class ModbusSlave:
                         logging.info("服务器线程已停止")
                 
                 self.error_message = None
-                return OperationResult(True, data="服务器已停止")
+                success_msg = f"Slave {self.config.name} 已停止"
+                self._log(success_msg, "INFO")
+                return OperationResult(True, data=success_msg)
                 
             except Exception as e:
-                logging.error(f"停止服务器失败: {e}")
+                error_msg = f"停止服务器失败: {e}"
+                logging.error(error_msg)
+                self._log(error_msg, "ERROR")
                 return OperationResult(False, error=f"停止失败: {str(e)}")
     
     async def _shutdown_server(self):
@@ -380,7 +407,7 @@ class ModbusSlave:
         
         Args:
             register_type: 寄存器类型 (coil, discrete_input, holding_register, input_register)
-            address: 地址
+            address: 地址（Modbus协议地址）
             
         Returns:
             操作结果
@@ -389,6 +416,7 @@ class ModbusSlave:
             if not self.slave_context:
                 return OperationResult(False, error="数据存储未初始化")
             
+            # 直接使用 Modbus 协议地址
             if register_type == 'coil':
                 values = self.slave_context.getValues(1, address, count=1)
             elif register_type == 'discrete_input':
@@ -400,10 +428,14 @@ class ModbusSlave:
             else:
                 return OperationResult(False, error=f"无效的寄存器类型: {register_type}")
             
-            return OperationResult(True, data=values[0] if values else 0)
+            value = values[0] if values else 0
+            self._log(f"读取 {register_type} 地址 {address} = {value}", "INFO")
+            return OperationResult(True, data=value)
             
         except Exception as e:
-            return OperationResult(False, error=f"读取失败: {str(e)}")
+            error_msg = f"读取失败: {str(e)}"
+            self._log(error_msg, "ERROR")
+            return OperationResult(False, error=error_msg)
     
     def write_register(self, register_type: str, address: int, value: Any) -> OperationResult:
         """
@@ -411,7 +443,7 @@ class ModbusSlave:
         
         Args:
             register_type: 寄存器类型 (coil, discrete_input, holding_register, input_register)
-            address: 地址
+            address: 地址（Modbus协议地址）
             value: 值
             
         Returns:
@@ -425,11 +457,15 @@ class ModbusSlave:
             point = self._find_point(register_type, address)
             if point:
                 if point.read_only:
-                    return OperationResult(False, error=f"地址 {address} 为只读")
+                    error_msg = f"地址 {address} 为只读"
+                    self._log(error_msg, "WARNING")
+                    return OperationResult(False, error=error_msg)
                 if not point.validate_value(value):
-                    return OperationResult(False, error=f"值 {value} 超出有效范围")
+                    error_msg = f"值 {value} 超出有效范围"
+                    self._log(error_msg, "WARNING")
+                    return OperationResult(False, error=error_msg)
             
-            # 写入值
+            # 直接使用 Modbus 协议地址
             if register_type == 'coil':
                 self.slave_context.setValues(1, address, [int(value)])
             elif register_type == 'discrete_input':
@@ -445,10 +481,14 @@ class ModbusSlave:
             if self.on_value_change:
                 self.on_value_change(register_type, address, value)
             
-            return OperationResult(True, data=f"成功写入值 {value} 到地址 {address}")
+            success_msg = f"写入 {register_type} 地址 {address} = {value}"
+            self._log(success_msg, "SUCCESS")
+            return OperationResult(True, data=success_msg)
             
         except Exception as e:
-            return OperationResult(False, error=f"写入失败: {str(e)}")
+            error_msg = f"写入失败: {str(e)}"
+            self._log(error_msg, "ERROR")
+            return OperationResult(False, error=error_msg)
     
     def _find_point(self, register_type: str, address: int) -> Optional[RegisterPoint]:
         """查找点位配置"""
@@ -456,6 +496,19 @@ class ModbusSlave:
             if point.register_type == register_type and point.address == address:
                 return point
         return None
+    
+    def _log(self, message: str, level: str = "INFO"):
+        """记录日志到日志窗口
+        
+        Args:
+            message: 日志消息
+            level: 日志级别 (INFO/WARNING/ERROR/SUCCESS)
+        """
+        if self.on_log:
+            try:
+                self.on_log(f"[{self.config.name}] {message}", level)
+            except Exception as e:
+                logging.error(f"日志回调失败: {e}")
     
     def get_all_values(self) -> Dict[str, Any]:
         """
@@ -504,6 +557,7 @@ class SlaveManager:
         """初始化 Slave 管理器"""
         self.slaves: Dict[str, ModbusSlave] = {}
         self.lock = threading.Lock()
+        self.on_log: Optional[Callable[[str, str], None]] = None  # 日志回调
     
     def add_slave(self, config: SlaveConfig) -> OperationResult:
         """
@@ -520,6 +574,9 @@ class SlaveManager:
                 return OperationResult(False, error=f"Slave ID {config.slave_id} 已存在")
             
             slave = ModbusSlave(config)
+            # 设置日志回调
+            if self.on_log:
+                slave.on_log = self.on_log
             self.slaves[config.slave_id] = slave
             return OperationResult(True, data=f"Slave {config.name} 添加成功")
     

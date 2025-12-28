@@ -120,6 +120,9 @@ class MainWindow(QMainWindow):
         # 创建状态栏
         self.create_status_bar()
         
+        # 设置slave_manager的日志回调
+        self.slave_manager.on_log = self.log_slave_message
+        
         # 显示欢迎信息
         self.show_status_message("就绪")
     
