@@ -111,6 +111,11 @@ class SlaveRegisterWidget(QWidget):
         self.tab_widget.addTab(self.holding_register_table, f"保持寄存器 ({len(self.get_points_by_type('holding_register'))})")
         self.tab_widget.addTab(self.input_register_table, f"输入寄存器 ({len(self.get_points_by_type('input_register'))})")
         
+        # 文件操作标签页
+        if self.slave.config.enable_file_operations:
+            self.file_widget = self.create_file_operations_widget()
+            self.tab_widget.addTab(self.file_widget, f"文件操作 ({len(self.slave.config.file_records)})")
+        
         main_layout.addWidget(self.tab_widget)
         
         self.setLayout(main_layout)
@@ -173,6 +178,142 @@ class SlaveRegisterWidget(QWidget):
                 header.resizeSection(7, 300)
         
         return table
+    
+    def create_file_operations_widget(self) -> QWidget:
+        """创建文件操作界面"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # 文件列表表格
+        self.file_table = QTableWidget()
+        self.file_table.setColumnCount(7)
+        self.file_table.setHorizontalHeaderLabels([
+            '文件号', '文件路径', '当前大小', '最大大小', '只读', '描述', '操作'
+        ])
+        
+        self.file_table.setAlternatingRowColors(True)
+        self.file_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
+        # 调整列宽
+        header = self.file_table.horizontalHeader()
+        if header:
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(6, 200)
+        
+        self.refresh_file_table()
+        
+        layout.addWidget(self.file_table)
+        widget.setLayout(layout)
+        
+        return widget
+    
+    def refresh_file_table(self):
+        """刷新文件表格"""
+        file_info = self.slave.get_file_info()
+        self.file_table.setRowCount(len(file_info))
+        
+        for row, info in enumerate(file_info):
+            # 文件号
+            self.file_table.setItem(row, 0, QTableWidgetItem(str(info['file_number'])))
+            
+            # 文件路径
+            from pathlib import Path
+            file_name = Path(info['file_path']).name
+            path_item = QTableWidgetItem(file_name)
+            path_item.setToolTip(info['file_path'])
+            self.file_table.setItem(row, 1, path_item)
+            
+            # 当前大小
+            size_text = f"{info['size']} B"
+            self.file_table.setItem(row, 2, QTableWidgetItem(size_text))
+            
+            # 最大大小
+            max_size_text = f"{info['max_size']} B"
+            self.file_table.setItem(row, 3, QTableWidgetItem(max_size_text))
+            
+            # 只读
+            read_only_text = "是" if info['read_only'] else "否"
+            self.file_table.setItem(row, 4, QTableWidgetItem(read_only_text))
+            
+            # 描述
+            self.file_table.setItem(row, 5, QTableWidgetItem(info['description']))
+            
+            # 操作按钮
+            btn_layout = QHBoxLayout()
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            
+            read_btn = QPushButton("读取")
+            read_btn.clicked.connect(
+                lambda checked, fn=info['file_number']: self.read_file(fn)
+            )
+            btn_layout.addWidget(read_btn)
+            
+            if not info['read_only']:
+                write_btn = QPushButton("写入")
+                write_btn.clicked.connect(
+                    lambda checked, fn=info['file_number']: self.write_file(fn)
+                )
+                btn_layout.addWidget(write_btn)
+            
+            btn_widget = QWidget()
+            btn_widget.setLayout(btn_layout)
+            self.file_table.setCellWidget(row, 6, btn_widget)
+    
+    def read_file(self, file_number: int):
+        """读取文件"""
+        result = self.slave.read_file_record(file_number)
+        
+        if result.success:
+            data = result.data
+            # 显示文件内容（前256字节）
+            preview = data[:256]
+            hex_str = ' '.join([f'{b:02X}' for b in preview])
+            
+            msg = f"文件 {file_number} 读取成功\n"
+            msg += f"大小: {len(data)} 字节\n\n"
+            msg += f"数据预览 (十六进制，前256字节):\n{hex_str}"
+            if len(data) > 256:
+                msg += "\n..."
+            
+            QMessageBox.information(self, "读取成功", msg)
+            self.status_message.emit(f"成功读取文件 {file_number}, {len(data)} 字节")
+        else:
+            QMessageBox.critical(self, "读取失败", result.error)
+    
+    def write_file(self, file_number: int):
+        """写入文件"""
+        # 简单的十六进制输入对话框
+        from PyQt6.QtWidgets import QInputDialog
+        
+        text, ok = QInputDialog.getText(
+            self,
+            "写入文件数据",
+            f"输入要写入文件 {file_number} 的数据 (十六进制，空格分隔):\n例如: 01 02 03 04",
+            QLineEdit.EchoMode.Normal
+        )
+        
+        if ok and text:
+            try:
+                # 解析十六进制数据
+                hex_values = text.strip().split()
+                data = bytes([int(h, 16) for h in hex_values])
+                
+                result = self.slave.write_file_record(file_number, 0, data)
+                
+                if result.success:
+                    QMessageBox.information(self, "写入成功", f"成功写入 {len(data)} 字节到文件 {file_number}")
+                    self.refresh_file_table()
+                    self.status_message.emit(f"成功写入文件 {file_number}, {len(data)} 字节")
+                else:
+                    QMessageBox.critical(self, "写入失败", result.error)
+            except ValueError as e:
+                QMessageBox.critical(self, "输入错误", f"无效的十六进制数据: {str(e)}")
     
     def get_points_by_type(self, register_type: str) -> list[RegisterPoint]:
         """获取指定类型的点位列表（按地址排序）"""

@@ -6,11 +6,11 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QSpinBox, QComboBox, QPushButton,
     QGroupBox, QLabel, QMessageBox, QFileDialog,
-    QDoubleSpinBox
+    QDoubleSpinBox, QCheckBox, QListWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
-from pymodbus_gui.core.slave_server import SlaveConfig, SlaveConnectionType, RegisterPoint
+from pymodbus_gui.core.slave_server import SlaveConfig, SlaveConnectionType, RegisterPoint, FileRecordConfig
 from pymodbus_gui.core.register_manager import RegisterManager
 
 
@@ -24,6 +24,7 @@ class AddSlaveDialog(QDialog):
         super().__init__(parent)
         
         self.register_points: list[RegisterPoint] = []
+        self.file_records: list[FileRecordConfig] = []
         self.register_manager = RegisterManager()
         
         self.init_ui()
@@ -160,6 +161,33 @@ class AddSlaveDialog(QDialog):
         point_group.setLayout(point_layout)
         main_layout.addWidget(point_group)
         
+        # 文件操作配置组
+        file_group = QGroupBox("文件操作配置（可选）")
+        file_layout = QVBoxLayout()
+        
+        self.enable_file_check = QCheckBox("启用文件操作功能")
+        file_layout.addWidget(self.enable_file_check)
+        
+        self.file_label = QLabel("未配置文件记录")
+        self.file_label.setStyleSheet("color: gray;")
+        file_layout.addWidget(self.file_label)
+        
+        file_btn_layout = QHBoxLayout()
+        
+        self.add_file_btn = QPushButton("添加文件记录")
+        self.add_file_btn.clicked.connect(self.add_file_record)
+        file_btn_layout.addWidget(self.add_file_btn)
+        
+        self.manage_file_btn = QPushButton("管理文件记录")
+        self.manage_file_btn.clicked.connect(self.manage_file_records)
+        file_btn_layout.addWidget(self.manage_file_btn)
+        
+        file_btn_layout.addStretch()
+        file_layout.addLayout(file_btn_layout)
+        
+        file_group.setLayout(file_layout)
+        main_layout.addWidget(file_group)
+        
         # 按钮
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -233,6 +261,73 @@ class AddSlaveDialog(QDialog):
         else:
             QMessageBox.critical(self, "失败", result.error)
     
+    def add_file_record(self):
+        """添加文件记录"""
+        from pymodbus_gui.ui.file_record_dialog import FileRecordDialog
+        from pathlib import Path
+        
+        dialog = FileRecordDialog(parent=self)
+        dialog.file_configured.connect(self.on_file_configured)
+        dialog.exec()
+    
+    def manage_file_records(self):
+        """管理文件记录"""
+        from pathlib import Path
+        if not self.file_records:
+            QMessageBox.information(self, "提示", "尚未添加任何文件记录")
+            return
+        
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        
+        # 简单的列表管理对话框
+        manage_dialog = QDialog(self)
+        manage_dialog.setWindowTitle("管理文件记录")
+        manage_dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout()
+        
+        list_widget = QListWidget()
+        for fr in self.file_records:
+            item_text = f"文件{fr.file_number}: {Path(fr.file_path).name}"
+            list_widget.addItem(item_text)
+        
+        layout.addWidget(list_widget)
+        
+        btn_layout = QHBoxLayout()
+        
+        remove_btn = QPushButton("删除选中")
+        remove_btn.clicked.connect(
+            lambda: self.remove_file_record(list_widget.currentRow(), manage_dialog)
+        )
+        btn_layout.addWidget(remove_btn)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(manage_dialog.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        manage_dialog.setLayout(layout)
+        manage_dialog.exec()
+    
+    def on_file_configured(self, file_config: FileRecordConfig):
+        """文件配置完成"""
+        # 检查文件号是否已存在
+        for fr in self.file_records:
+            if fr.file_number == file_config.file_number:
+                QMessageBox.warning(self, "警告", f"文件号 {file_config.file_number} 已存在")
+                return
+        
+        self.file_records.append(file_config)
+        self.file_label.setText(f"已配置 {len(self.file_records)} 个文件记录")
+        self.file_label.setStyleSheet("color: green;")
+    
+    def remove_file_record(self, index: int, dialog: QDialog):
+        """删除文件记录"""
+        if 0 <= index < len(self.file_records):
+            self.file_records.pop(index)
+            self.file_label.setText(f"已配置 {len(self.file_records)} 个文件记录" if self.file_records else "未配置文件记录")
+            dialog.accept()  # 关闭对话框
+    
     def validate_input(self) -> tuple[bool, str]:
         """验证输入"""
         if not self.slave_id_edit.text().strip():
@@ -294,6 +389,10 @@ class AddSlaveDialog(QDialog):
         
         # 点表配置
         config.register_points = self.register_points
+        
+        # 文件操作配置
+        config.enable_file_operations = self.enable_file_check.isChecked()
+        config.file_records = self.file_records
         
         # 验证点表
         if self.register_points:

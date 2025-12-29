@@ -8,6 +8,8 @@ from enum import Enum
 import threading
 import logging
 import socket
+import struct
+from pathlib import Path
 from pymodbus.server import StartAsyncSerialServer, StartAsyncTcpServer
 from pymodbus.datastore import (
     ModbusSequentialDataBlock,
@@ -50,6 +52,32 @@ class RegisterPoint:
 
 
 @dataclass
+class FileRecordConfig:
+    """文件记录配置"""
+    file_number: int  # 文件号
+    file_path: str  # 文件路径
+    max_size: int = 65535  # 最大文件大小（字节）
+    
+    # 固定长度配置（优先使用）
+    file_length: Optional[int] = None  # 固定文件长度（字节），如果设置则不读取长度寄存器
+    
+    # 触发配置（可选）
+    trigger_enabled: bool = False  # 是否启用触发
+    trigger_function_code: int = 6  # 触发功能码（6=写单个寄存器）
+    trigger_address: int = 0  # 触发地址
+    
+    # 长度寄存器配置（当file_length未设置时使用）
+    length_register_enabled: bool = False  # 是否从寄存器读取长度
+    length_function_code: int = 3  # 长度功能码（3=读保持寄存器）
+    length_address: int = 0  # 长度寄存器地址
+    length_quantity: int = 2  # 长度寄存器数量（32位=2个寄存器）
+    
+    read_only: bool = False  # 只读
+    description: str = ""  # 描述
+
+
+
+@dataclass
 class SlaveConfig:
     """Slave 配置数据类"""
     slave_id: str  # Slave 唯一标识
@@ -76,6 +104,10 @@ class SlaveConfig:
     
     # 点位配置
     register_points: List[RegisterPoint] = field(default_factory=list)
+    
+    # 文件记录配置
+    file_records: List[FileRecordConfig] = field(default_factory=list)
+    enable_file_operations: bool = False  # 是否启用文件操作功能
 
 
 @dataclass
@@ -114,8 +146,32 @@ class ModbusSlave:
         self.on_value_change: Optional[Callable] = None
         self.on_log: Optional[Callable[[str, str], None]] = None  # 日志回调 (message, level)
         
+        # 文件记录存储
+        self.file_data: Dict[int, bytes] = {}  # {file_number: file_content}
+        self._init_file_records()
+        
         # 初始化数据存储
         self._init_datastore()
+    
+    def _init_file_records(self):
+        """初始化文件记录"""
+        if not self.config.enable_file_operations:
+            return
+        
+        for file_config in self.config.file_records:
+            try:
+                file_path = Path(file_config.file_path)
+                if file_path.exists():
+                    with open(file_path, 'rb') as f:
+                        data = f.read(file_config.max_size)
+                        self.file_data[file_config.file_number] = data
+                        self._log(f"加载文件记录 {file_config.file_number}: {file_path.name} ({len(data)} 字节)", "INFO")
+                else:
+                    # 创建空文件
+                    self.file_data[file_config.file_number] = b''
+                    self._log(f"创建空文件记录 {file_config.file_number}", "INFO")
+            except Exception as e:
+                self._log(f"初始化文件记录 {file_config.file_number} 失败: {e}", "WARNING")
     
     def _init_datastore(self):
         """初始化数据存储"""
@@ -509,6 +565,185 @@ class ModbusSlave:
                 self.on_log(f"[{self.config.name}] {message}", level)
             except Exception as e:
                 logging.error(f"日志回调失败: {e}")
+    
+    def read_file_record(self, file_number: int, record_number: int = 0, record_length: Optional[int] = None) -> OperationResult:
+        """
+        读取文件记录 (功能码20)
+        
+        Args:
+            file_number: 文件号
+            record_number: 记录号（偏移量）
+            record_length: 记录长度（字数），如果为None则自动确定
+            
+        Returns:
+            操作结果
+        """
+        try:
+            if not self.config.enable_file_operations:
+                return OperationResult(False, error="文件操作功能未启用")
+            
+            # 查找文件配置
+            file_config = None
+            for fc in self.config.file_records:
+                if fc.file_number == file_number:
+                    file_config = fc
+                    break
+            
+            if not file_config:
+                return OperationResult(False, error=f"文件 {file_number} 配置不存在")
+            
+            if file_number not in self.file_data:
+                return OperationResult(False, error=f"文件 {file_number} 数据不存在")
+            
+            # 1. 如果启用了触发，先写触发寄存器
+            if file_config.trigger_enabled:
+                try:
+                    # 写触发寄存器（通常写入文件号或触发值1）
+                    trigger_value = file_number if file_config.trigger_function_code == 6 else 1
+                    if file_config.trigger_function_code == 6:  # 写单个寄存器
+                        self.slave_context.setValues(3, file_config.trigger_address, [trigger_value])
+                    self._log(f"触发文件 {file_number} 读取，地址={file_config.trigger_address}", "INFO")
+                except Exception as e:
+                    self._log(f"触发寄存器写入失败: {e}", "WARNING")
+            
+            # 2. 确定读取长度
+            if record_length is None:
+                # 优先使用固定长度
+                if file_config.file_length is not None:
+                    byte_length = file_config.file_length
+                    self._log(f"使用固定长度: {byte_length} 字节", "INFO")
+                # 否则从长度寄存器读取
+                elif file_config.length_register_enabled:
+                    try:
+                        # 读取长度寄存器
+                        if file_config.length_function_code == 3:  # 读保持寄存器
+                            length_values = self.slave_context.getValues(
+                                3, 
+                                file_config.length_address, 
+                                count=file_config.length_quantity
+                            )
+                            # 根据寄存器数量解析长度
+                            if file_config.length_quantity == 1:
+                                byte_length = length_values[0]
+                            elif file_config.length_quantity == 2:
+                                # 假设高位在前（Big Endian）
+                                byte_length = (length_values[0] << 16) | length_values[1]
+                            else:
+                                byte_length = sum(v << (16 * (file_config.length_quantity - 1 - i)) 
+                                                for i, v in enumerate(length_values))
+                            
+                            self._log(f"从寄存器读取长度: {byte_length} 字节 (地址={file_config.length_address})", "INFO")
+                        else:
+                            return OperationResult(False, error=f"不支持的长度功能码: {file_config.length_function_code}")
+                    except Exception as e:
+                        return OperationResult(False, error=f"读取长度寄存器失败: {e}")
+                else:
+                    # 读取整个文件
+                    byte_length = len(self.file_data[file_number]) - record_number * 2
+                    self._log(f"读取剩余全部数据: {byte_length} 字节", "INFO")
+            else:
+                # 使用指定的record_length（字数转字节数）
+                byte_length = record_length * 2
+            
+            # 3. 读取文件数据
+            file_content = self.file_data[file_number]
+            start = record_number * 2
+            end = min(start + byte_length, len(file_content))
+            data = file_content[start:end]
+            
+            self._log(f"读取文件记录 {file_number}, 偏移={record_number}, 长度={len(data)}字节", "SUCCESS")
+            return OperationResult(True, data=data)
+            
+        except Exception as e:
+            error_msg = f"读取文件记录失败: {str(e)}"
+            self._log(error_msg, "ERROR")
+            return OperationResult(False, error=error_msg)
+    
+    def write_file_record(self, file_number: int, record_number: int, data: bytes) -> OperationResult:
+        """
+        写入文件记录 (功能码21)
+        
+        Args:
+            file_number: 文件号
+            record_number: 记录号（偏移量）
+            data: 要写入的数据
+            
+        Returns:
+            操作结果
+        """
+        try:
+            if not self.config.enable_file_operations:
+                return OperationResult(False, error="文件操作功能未启用")
+            
+            # 查找文件配置
+            file_config = None
+            for fc in self.config.file_records:
+                if fc.file_number == file_number:
+                    file_config = fc
+                    break
+            
+            if not file_config:
+                return OperationResult(False, error=f"文件 {file_number} 未配置")
+            
+            if file_config.read_only:
+                return OperationResult(False, error=f"文件 {file_number} 为只读")
+            
+            # 初始化文件数据（如果不存在）
+            if file_number not in self.file_data:
+                self.file_data[file_number] = b''
+            
+            # 扩展文件大小（如果需要）
+            offset = record_number * 2
+            required_size = offset + len(data)
+            
+            if required_size > file_config.max_size:
+                return OperationResult(False, error=f"超出文件最大大小 {file_config.max_size}")
+            
+            current_data = bytearray(self.file_data[file_number])
+            
+            # 扩展到需要的大小
+            if len(current_data) < required_size:
+                current_data.extend(b'\x00' * (required_size - len(current_data)))
+            
+            # 写入数据
+            current_data[offset:offset+len(data)] = data
+            self.file_data[file_number] = bytes(current_data)
+            
+            # 保存到文件
+            if file_config.file_path:
+                try:
+                    with open(file_config.file_path, 'wb') as f:
+                        f.write(self.file_data[file_number])
+                except Exception as e:
+                    self._log(f"保存文件失败: {e}", "WARNING")
+            
+            self._log(f"写入文件记录 {file_number}, 偏移={record_number}, 长度={len(data)}字节", "SUCCESS")
+            return OperationResult(True, data=f"成功写入 {len(data)} 字节")
+            
+        except Exception as e:
+            error_msg = f"写入文件记录失败: {str(e)}"
+            self._log(error_msg, "ERROR")
+            return OperationResult(False, error=error_msg)
+    
+    def get_file_info(self) -> List[Dict[str, Any]]:
+        """
+        获取所有文件信息
+        
+        Returns:
+            文件信息列表
+        """
+        file_info = []
+        for file_config in self.config.file_records:
+            size = len(self.file_data.get(file_config.file_number, b''))
+            file_info.append({
+                'file_number': file_config.file_number,
+                'file_path': file_config.file_path,
+                'size': size,
+                'max_size': file_config.max_size,
+                'read_only': file_config.read_only,
+                'description': file_config.description
+            })
+        return file_info
     
     def get_all_values(self) -> Dict[str, Any]:
         """
